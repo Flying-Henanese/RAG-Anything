@@ -16,6 +16,9 @@ logger = logging.getLogger("another_ec.processor")
 # 本地 OpenAI 兼容服务需要的占位 API Key
 LOCAL_API_KEY = "no-api-key"
 
+# 当前使用的视觉模型
+LOCAL_VLM_MODEL = "Qwen3-VL-8B-Instruct"
+
 class MarkdownMultimodalProcessor:
     """
     Markdown 多模态处理器 (功能完备版)
@@ -197,14 +200,15 @@ async def vlm_call_local_qwen(prompt: str, system_prompt: str, image_base64: Opt
         })
     
     payload = {
-        "model": "qwen3.5-27b",  # 使用用户指定的本地模型名称
+        "model": LOCAL_VLM_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
         ],
         "stream": False,
-        "max_tokens": 1024,
-        "response_format": {"type": "json_object"}  # 【方案一：强制输出 JSON 结构】
+        "max_tokens": 2048,
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"}  # 强制输出 JSON 结构
     }
 
     async with httpx.AsyncClient() as client:

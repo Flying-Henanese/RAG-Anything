@@ -71,16 +71,29 @@ class MarkdownContextExtractor:
             context_parts.append(parent_header)
 
         # 2. 寻找上文段落 (Context Paragraphs)
-        # 我们向上一共抓取最近的 2 个非空的正文段落，提供更丰富的语境
+        # 仅提取真实段落（paragraph_open -> inline -> paragraph_close）中的正文，避免误抓标题/表格/列表噪声
         prev_paragraphs = []
-        max_paras = 2
+        max_paras = 5
         for i in range(target_idx - 1, -1, -1):
-            if tokens[i].type == "inline" and tokens[i].content.strip():
-                # 排除掉标题（只抓正文）
-                if i > 0 and tokens[i-1].type != "heading_open":
-                    prev_paragraphs.append(tokens[i].content.strip())
-                    if len(prev_paragraphs) >= max_paras:
-                        break
+            token = tokens[i]
+            if token.type != "inline":
+                continue
+
+            text = token.content.strip()
+            if not text:
+                continue
+
+            # 必须是段落正文，而不是标题/其他块内 inline
+            if i == 0 or tokens[i - 1].type != "paragraph_open":
+                continue
+
+            # 跳过纯图片行（inline children 全是 image）
+            if token.children and all(child.type == "image" for child in token.children):
+                continue
+
+            prev_paragraphs.append(text)
+            if len(prev_paragraphs) >= max_paras:
+                break
         
         # 因为我们是向上倒序遍历的，拼接前需要把段落顺序翻转回正常的阅读顺序
         if prev_paragraphs:

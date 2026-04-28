@@ -25,6 +25,7 @@ dependencies = [
     "lightrag-hku",
     "mineru[core]",
     "tqdm",
+    "markdown-it-py>3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +58,7 @@ Repository = "https://github.com/HKUDS/RAG-Anything"
 Issues = "https://github.com/HKUDS/RAG-Anything/issues"
 
 [tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 dev-dependencies = [
     "pytest>=6.0",
     "pytest-asyncio",

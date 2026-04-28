@@ -9,7 +9,7 @@ TABLE_ANALYSIS_SYSTEM = "You are an expert data analyst. Provide detailed table 
 VISION_PROMPT_WITH_CONTEXT = """Please analyze this image in detail, considering the surrounding context. Provide a JSON response:
 
 {{
-    "detailed_description": "A comprehensive visual description identifying all objects, text, and explaining how they relate to the surrounding context. IMPORTANT: If the image is a screenshot of a system interface or feature demonstration containing dummy text (e.g., random articles or data used just for illustration), DO NOT summarize the dummy text. Focus ONLY on describing the UI structure, functionality shown, and elements that directly relate to the provided context.",
+    "detailed_description": "A direct, clear, and concise description of the image's core subject and its logical connection to the context. DO NOT write long-winded paragraphs. Keep it brief and highly informative. IMPORTANT: If the image is a screenshot of a system interface or feature demonstration containing dummy text (e.g., random articles or data used just for illustration), DO NOT summarize the dummy text. Focus ONLY on describing the UI structure, functionality shown, and elements that directly relate to the provided context.",
     "entity_info": {{
         "entity_name": "{entity_name}",
         "entity_type": "image",

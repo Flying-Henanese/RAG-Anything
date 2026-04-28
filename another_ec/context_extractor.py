@@ -52,50 +52,53 @@ class MarkdownContextExtractor:
 
     def _get_surgical_context(self, tokens: List[Token], target_idx: int) -> str:
         """
-        核心算法：手术刀式提取。
-        1. 向上回溯最近的标题。
-        2. 抓取紧邻的上文段落。
+        核心算法：手术刀式提取 (升级版)。
+        1. 双向回溯/探测关联标题，支持 | 分隔的路径。
+        2. 以 hr 为逻辑边界，提取紧邻的正文段落。
         """
         context_parts = []
         
-        # 1. 寻找父章节标题 (Heading Ancestry)
+        # 1. 寻找关联标题 (Heading Association)
+        # 搜索策略：优先向上找，若上方紧邻是边界或空，尝试向下找 1-2 行（处理头图场景）
         parent_header = ""
-        for i in range(target_idx - 1, -1, -1):
+        search_indices = list(range(target_idx - 1, -1, -1))
+        # 兜底：如果图片出现在章节的最上方，探测下方最近的标题
+        search_indices.extend(list(range(target_idx + 1, min(target_idx + 4, len(tokens)))))
+
+        for i in search_indices:
+            # 遇到逻辑边界停止回溯 (仅针对向上回溯)
+            if i < target_idx and tokens[i].type == "hr":
+                break
+                
             if tokens[i].type == "heading_open":
-                # 标题内容通常在下一个 inline token 中
                 if i + 1 < len(tokens) and tokens[i+1].type == "inline":
-                    level = tokens[i].tag  # h1, h2...
-                    parent_header = f"Section({level}): {tokens[i+1].content}"
+                    raw_content = tokens[i+1].content
+                    # 鲁棒性：尝试解析 | 路径，若无则使用原内容
+                    parts = [p.strip() for p in raw_content.split('|')]
+                    if len(parts) > 1:
+                        path = " > ".join(parts[:-1])
+                        ctype = parts[-1]
+                        parent_header = f"Location Path: {path}\nContent Type: {ctype}"
+                    else:
+                        parent_header = f"Section: {raw_content}"
                     break
+        
         if parent_header:
             context_parts.append(parent_header)
 
-        # 2. 寻找上文段落 (Context Paragraphs)
-        # 仅提取真实段落（paragraph_open -> inline -> paragraph_close）中的正文，避免误抓标题/表格/列表噪声
+        # 2. 寻找邻近正文 (Context Paragraphs)
         prev_paragraphs = []
         max_paras = 5
         for i in range(target_idx - 1, -1, -1):
-            token = tokens[i]
-            if token.type != "inline":
-                continue
-
-            text = token.content.strip()
-            if not text:
-                continue
-
-            # 必须是段落正文，而不是标题/其他块内 inline
-            if i == 0 or tokens[i - 1].type != "paragraph_open":
-                continue
-
-            # 跳过纯图片行（inline children 全是 image）
-            if token.children and all(child.type == "image" for child in token.children):
-                continue
-
-            prev_paragraphs.append(text)
-            if len(prev_paragraphs) >= max_paras:
+            if tokens[i].type == "hr": # 碰到分隔符停止提取，避免跨块语境污染
                 break
+            if tokens[i].type == "inline" and tokens[i].content.strip():
+                # 排除掉已经是标题的内容
+                if i > 0 and tokens[i-1].type != "heading_open":
+                    prev_paragraphs.append(tokens[i].content.strip())
+                    if len(prev_paragraphs) >= max_paras:
+                        break
         
-        # 因为我们是向上倒序遍历的，拼接前需要把段落顺序翻转回正常的阅读顺序
         if prev_paragraphs:
             prev_paragraphs.reverse()
             context_parts.append("Background Context:\n" + "\n".join(prev_paragraphs))

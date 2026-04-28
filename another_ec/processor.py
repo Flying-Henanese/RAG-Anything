@@ -13,6 +13,9 @@ from . import prompts
 
 logger = logging.getLogger("another_ec.processor")
 
+# 本地 OpenAI 兼容服务需要的占位 API Key
+LOCAL_API_KEY = "no-api-key"
+
 class MarkdownMultimodalProcessor:
     """
     Markdown 多模态处理器 (功能完备版)
@@ -158,16 +161,13 @@ class MarkdownMultimodalProcessor:
             logger.error(f"Table analysis failed: {e}")
             return {"success": False, "error": str(e)}
 
-# --- 测试用 main 函数 ---
-SILICONFLOW_API_KEY = "YOUR_SILICONFLOW_API_KEY_HERE"
-
-async def vlm_call_siliconflow(prompt: str, system_prompt: str, image_base64: Optional[str] = None) -> str:
+async def vlm_call_local_qwen(prompt: str, system_prompt: str, image_base64: Optional[str] = None) -> str:
     """
-    硅基流动 (SiliconFlow) VLM 接口调用实现
+    本地 Qwen VLM 接口调用实现 (OpenAI 兼容)
     """
-    url = "https://api.siliconflow.cn/v1/chat/completions"
+    url = "http://192.168.0.194:8888/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
+        "Authorization": f"Bearer {LOCAL_API_KEY}",
         "Content-Type": "application/json"
     }
     
@@ -182,7 +182,7 @@ async def vlm_call_siliconflow(prompt: str, system_prompt: str, image_base64: Op
         })
     
     payload = {
-        "model": "Qwen/Qwen3-VL-8B-Instruct",  # 使用用户指定的模型
+        "model": "qwen3.5-27b",  # 使用用户指定的本地模型名称
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
@@ -197,34 +197,34 @@ async def vlm_call_siliconflow(prompt: str, system_prompt: str, image_base64: Op
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.error(f"SiliconFlow API Error: {e}")
+            logger.error(f"Local Qwen API Error: {e}")
             raise
 
 async def main():
-    # 1. 模拟测试 Markdown 数据
-    test_md = """
-# 自动驾驶技术概览
-这是一张关于传感器融合的示意图。
-![sensor_fusion](https://example.com/sensor_fusion.jpg)
-
-下表展示了不同传感器的性能对比：
-| 传感器 | 精度 | 范围 |
-| :--- | :--- | :--- |
-| 激光雷达 | 高 | 200m |
-| 毫米波雷达 | 中 | 250m |
-"""
+    # 1. 使用指定的测试 Markdown 文档
+    md_file_path = "/home/mineru_dev/github/RAG-Anything/test_md/高性能文档解析方案 2e2848cda67f8020abf0d58252a28708.md"
+    md_path = Path(md_file_path)
     
-    # 2. 模拟图片解析器 (返回一个 1x1 像素的透明图片 base64 字节流用于占位测试)
-    def dummy_image_resolver(url: str) -> bytes:
-        # 实际使用时，这里应该是读取本地文件或下载网络图片
-        return base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    if not md_path.exists():
+        print(f"错误: 找不到测试文档 {md_file_path}")
+        return
+
+    with open(md_path, "r", encoding="utf-8") as f:
+        test_md = f.read()
+    
+    # 2. 获取文档所在目录，用于解析本地图片
+    base_dir = md_path.parent
 
     # 3. 初始化处理器
-    processor = MarkdownMultimodalProcessor(vlm_func=vlm_call_siliconflow)
+    processor = MarkdownMultimodalProcessor(vlm_func=vlm_call_local_qwen)
     
-    print(">>> 开始处理文档...")
+    print(f">>> 开始处理文档: {md_path.name}")
+    print(f">>> 基础目录: {base_dir}")
+    
     try:
-        results = await processor.process_document(test_md, image_resolver=dummy_image_resolver)
+        # 使用内置的 image_resolver (通过传入 base_dir 自动创建)
+        # 它会自动处理文档中引用的本地图片路径
+        results = await processor.process_document(test_md, base_dir=base_dir)
         
         import json
         print("\n>>> 处理完成，结果如下:")
@@ -233,8 +233,4 @@ async def main():
         print(f"\n>>> 处理过程中发生错误: {e}")
 
 if __name__ == "__main__":
-    if SILICONFLOW_API_KEY == "YOUR_SILICONFLOW_API_KEY_HERE":
-        print("错误: 请先在脚本中填入您的 SILICONFLOW_API_KEY")
-    else:
-        # 运行测试
-        asyncio.run(main())
+    asyncio.run(main())

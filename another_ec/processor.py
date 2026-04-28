@@ -112,12 +112,27 @@ class MarkdownMultimodalProcessor:
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
         try:
+            # 记录即将调用的 VLM 参数长度，确认图片是否正常传入
+            logger.debug(f"Calling VLM for {image_url}. Prompt len: {len(user_prompt)}, Base64 len: {len(image_base64)}")
+            
             raw_response = await self.vlm_func(
                 user_prompt, 
                 prompts.IMAGE_ANALYSIS_SYSTEM, 
                 image_base64
             )
+            
+            # 关键诊断日志：打印 VLM 返回的原始字符串
+            logger.info(f"[Diagnostics] VLM Raw Response for {image_url}:\n{raw_response}")
+            
+            if not raw_response or not raw_response.strip():
+                logger.warning(f"VLM returned empty string for {image_url}")
+                
             result = robust_json_parse(raw_response)
+            
+            # 诊断日志：如果解析结果为空，说明 robust_json_parse 失败了
+            if not result:
+                logger.warning(f"[Diagnostics] JSON parsing failed or returned empty dict for {image_url}. Raw string was: {raw_response[:200]}...")
+            
             return {
                 "url": image_url,
                 "enhanced_caption": result.get("detailed_description", ""),

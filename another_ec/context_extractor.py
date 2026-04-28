@@ -70,17 +70,22 @@ class MarkdownContextExtractor:
         if parent_header:
             context_parts.append(parent_header)
 
-        # 2. 寻找紧邻的上文段落 (Immediate Context)
-        # 我们寻找距离目标最近的一个非空的 inline 文本
-        prev_paragraph = ""
+        # 2. 寻找上文段落 (Context Paragraphs)
+        # 我们向上一共抓取最近的 2 个非空的正文段落，提供更丰富的语境
+        prev_paragraphs = []
+        max_paras = 2
         for i in range(target_idx - 1, -1, -1):
             if tokens[i].type == "inline" and tokens[i].content.strip():
-                # 排除掉标题（因为上面已经抓过了）
-                if tokens[i-1].type != "heading_open":
-                    prev_paragraph = f"Direct Context: {tokens[i].content}"
-                    break
-        if prev_paragraph:
-            context_parts.append(prev_paragraph)
+                # 排除掉标题（只抓正文）
+                if i > 0 and tokens[i-1].type != "heading_open":
+                    prev_paragraphs.append(tokens[i].content.strip())
+                    if len(prev_paragraphs) >= max_paras:
+                        break
+        
+        # 因为我们是向上倒序遍历的，拼接前需要把段落顺序翻转回正常的阅读顺序
+        if prev_paragraphs:
+            prev_paragraphs.reverse()
+            context_parts.append("Background Context:\n" + "\n".join(prev_paragraphs))
 
         # 3. 组合并截断
         full_context = "\n".join(context_parts)

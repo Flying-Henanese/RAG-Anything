@@ -1,5 +1,7 @@
 import logging
 import base64
+import asyncio
+import httpx
 from typing import Dict, Any, Optional, Callable, Awaitable, List
 from pathlib import Path
 
@@ -148,3 +150,84 @@ class MarkdownMultimodalProcessor:
         except Exception as e:
             logger.error(f"Table analysis failed: {e}")
             return {"success": False, "error": str(e)}
+
+# --- 测试用 main 函数 ---
+SILICONFLOW_API_KEY = "YOUR_SILICONFLOW_API_KEY_HERE"
+
+async def vlm_call_siliconflow(prompt: str, system_prompt: str, image_base64: Optional[str] = None) -> str:
+    """
+    硅基流动 (SiliconFlow) VLM 接口调用实现
+    """
+    url = "https://api.siliconflow.cn/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # 构造多模态消息内容
+    content = [{"type": "text", "text": prompt}]
+    if image_base64:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image_base64}"
+            }
+        })
+    
+    payload = {
+        "model": "Qwen/Qwen3-VL-8B-Instruct",  # 使用用户指定的模型
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content}
+        ],
+        "stream": False,
+        "max_tokens": 1024
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(url, json=payload, headers=headers, timeout=60)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"SiliconFlow API Error: {e}")
+            raise
+
+async def main():
+    # 1. 模拟测试 Markdown 数据
+    test_md = """
+# 自动驾驶技术概览
+这是一张关于传感器融合的示意图。
+![sensor_fusion](https://example.com/sensor_fusion.jpg)
+
+下表展示了不同传感器的性能对比：
+| 传感器 | 精度 | 范围 |
+| :--- | :--- | :--- |
+| 激光雷达 | 高 | 200m |
+| 毫米波雷达 | 中 | 250m |
+"""
+    
+    # 2. 模拟图片解析器 (返回一个 1x1 像素的透明图片 base64 字节流用于占位测试)
+    def dummy_image_resolver(url: str) -> bytes:
+        # 实际使用时，这里应该是读取本地文件或下载网络图片
+        return base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+
+    # 3. 初始化处理器
+    processor = MarkdownMultimodalProcessor(vlm_func=vlm_call_siliconflow)
+    
+    print(">>> 开始处理文档...")
+    try:
+        results = await processor.process_document(test_md, image_resolver=dummy_image_resolver)
+        
+        import json
+        print("\n>>> 处理完成，结果如下:")
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+    except Exception as e:
+        print(f"\n>>> 处理过程中发生错误: {e}")
+
+if __name__ == "__main__":
+    if SILICONFLOW_API_KEY == "YOUR_SILICONFLOW_API_KEY_HERE":
+        print("错误: 请先在脚本中填入您的 SILICONFLOW_API_KEY")
+    else:
+        # 运行测试
+        asyncio.run(main())

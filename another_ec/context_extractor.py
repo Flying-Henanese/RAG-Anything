@@ -88,7 +88,7 @@ class MarkdownContextExtractor:
 
         # 2. 寻找邻近正文 (Context Paragraphs)
         prev_paragraphs = []
-        max_paras = 2
+        max_paras = 5
         for i in range(target_idx - 1, -1, -1):
             if tokens[i].type == "hr": # 碰到分隔符停止提取，避免跨块语境污染
                 break

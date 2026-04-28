@@ -6,6 +6,7 @@ from pathlib import Path
 # 内部引用
 from .context_extractor import MarkdownContextExtractor
 from .json_utils import robust_json_parse
+from .image_utils import create_image_resolver
 from . import prompts
 
 logger = logging.getLogger("another_ec.processor")
@@ -29,15 +30,21 @@ class MarkdownMultimodalProcessor:
     async def process_document(
         self, 
         md_content: str, 
-        image_resolver: Callable[[str], bytes] = None
+        image_resolver: Callable[[str], bytes] = None,
+        base_dir: str | Path = "."
     ) -> List[Dict[str, Any]]:
         """
         自动扫描并处理 Markdown 中的所有多模态元素（图片和表格）
         
         Args:
             md_content: Markdown 全文
-            image_resolver: 一个函数，接收 URL 返回图片字节流（用于处理本地路径或网络下载）
+            image_resolver: 接收 URL 返回字节流的函数。若未提供，将使用内置支持网络/本地路径的全能解析器。
+            base_dir: 若使用内置解析器，请传入 Markdown 文件所在的物理目录以确保相对路径正确。
         """
+        # 如果用户没有注入自己的解析器，启用我们写的内置强力解析器
+        if image_resolver is None:
+            image_resolver = create_image_resolver(base_dir)
+
         tokens = self.extractor.md.parse(md_content)
         results = []
 

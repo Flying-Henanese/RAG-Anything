@@ -49,6 +49,7 @@ TABLE_PROMPT = """Please analyze this table and provide a JSON response:
         "summary": "concise summary of findings"
     }}
 }}
+"""
 
 # ---------------------------------------------------------
 # 以下为适配传统 RAG 的精简版 (Concise) 提示词

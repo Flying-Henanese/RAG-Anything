@@ -203,7 +203,8 @@ async def vlm_call_local_qwen(prompt: str, system_prompt: str, image_base64: Opt
             {"role": "user", "content": content}
         ],
         "stream": False,
-        "max_tokens": 1024
+        "max_tokens": 1024,
+        "response_format": {"type": "json_object"}  # 【方案一：强制输出 JSON 结构】
     }
 
     async with httpx.AsyncClient() as client:

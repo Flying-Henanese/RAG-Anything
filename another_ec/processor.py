@@ -10,6 +10,7 @@ from .context_extractor import MarkdownContextExtractor
 from .json_utils import robust_json_parse
 from .image_utils import create_image_resolver
 from . import prompts
+from .markdown_utils import format_as_collapsible_block
 
 logger = logging.getLogger("another_ec.processor")
 
@@ -34,6 +35,24 @@ class MarkdownMultimodalProcessor:
         self.vlm_func = vlm_func
         self.extractor = context_extractor or MarkdownContextExtractor()
         self.caption_mode = caption_mode
+
+    def _normalize_vlm_result(self, parsed_result: Any, raw_response: str, source: str) -> Dict[str, Any]:
+        """将 robust_json_parse 的结果统一规范为 dict，避免 list/str 导致 .get 崩溃。"""
+        if isinstance(parsed_result, dict):
+            return parsed_result
+
+        if isinstance(parsed_result, list):
+            for item in parsed_result:
+                if isinstance(item, dict):
+                    return item
+            logger.warning(f"[Diagnostics] {source}: parsed result is list but contains no dict. Raw: {raw_response[:200]}...")
+            return {}
+
+        if parsed_result is None:
+            return {}
+
+        logger.warning(f"[Diagnostics] {source}: parsed result type={type(parsed_result).__name__}. Raw: {raw_response[:200]}...")
+        return {}
 
     async def process_document(
         self, 
@@ -135,12 +154,13 @@ class MarkdownMultimodalProcessor:
             if not raw_response or not raw_response.strip():
                 logger.warning(f"VLM returned empty string for {image_url}")
                 
-            result = robust_json_parse(raw_response)
-            
-            # 诊断日志：如果解析结果为空，说明 robust_json_parse 失败了
+            parsed_result = robust_json_parse(raw_response)
+            result = self._normalize_vlm_result(parsed_result, raw_response, f"image:{image_url}")
+
+            # 诊断日志：如果解析结果为空，说明 robust_json_parse 或归一化后没有可用字段
             if not result:
-                logger.warning(f"[Diagnostics] JSON parsing failed or returned empty dict for {image_url}. Raw string was: {raw_response[:200]}...")
-            
+                logger.warning(f"[Diagnostics] JSON parsing failed or normalized result is empty for {image_url}. Raw string was: {raw_response[:200]}...")
+
             return {
                 "url": image_url,
                 "enhanced_caption": result.get("detailed_description", ""),
@@ -169,7 +189,8 @@ class MarkdownMultimodalProcessor:
         try:
             # 表格不需要图片数据，传 None
             raw_response = await self.vlm_func(user_prompt, prompts.TABLE_ANALYSIS_SYSTEM, None)
-            result = robust_json_parse(raw_response)
+            parsed_result = robust_json_parse(raw_response)
+            result = self._normalize_vlm_result(parsed_result, raw_response, "table")
             return {
                 "enhanced_caption": result.get("detailed_description", ""),
                 "entity_info": result.get("entity_info", {}),
@@ -245,10 +266,17 @@ async def main():
         # 使用内置的 image_resolver (通过传入 base_dir 自动创建)
         # 它会自动处理文档中引用的本地图片路径
         results = await processor.process_document(test_md, base_dir=base_dir)
-        
-        import json
-        print("\n>>> 处理完成，结果如下:")
-        print(json.dumps(results, indent=2, ensure_ascii=False))
+
+        blocks = []
+        for item in results:
+            data = item.get("data") if isinstance(item, dict) else None
+            if isinstance(data, dict):
+                block = format_as_collapsible_block(data)
+                if block:
+                    blocks.append(block)
+
+        injected_markdown_block = "\n".join(blocks)
+        print(injected_markdown_block)
     except Exception as e:
         print(f"\n>>> 处理过程中发生错误: {e}")
 

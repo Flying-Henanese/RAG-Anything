@@ -49,9 +49,20 @@ def robust_json_parse(response: str) -> dict:
     candidates = extract_all_json_candidates(response)
     for json_candidate in candidates:
         result = try_parse_json(json_candidate)
-        if result: return result
+        if result:
+            # --- 修复逻辑：如果是列表，取第一个字典 ---
+            if isinstance(result, list) and len(result) > 0:
+                return result[0] if isinstance(result[0], dict) else {}
+            if isinstance(result, dict):
+                return result
+    
     for json_candidate in candidates:
         cleaned = basic_json_cleanup(json_candidate)
         result = try_parse_json(cleaned)
-        if result: return result
+        if result:
+            if isinstance(result, list) and len(result) > 0:
+                return result[0] if isinstance(result[0], dict) else {}
+            if isinstance(result, dict):
+                return result
+                
     return {} # 简化版暂不放正则提取，保证轻量

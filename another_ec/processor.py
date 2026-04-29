@@ -9,6 +9,7 @@ from pathlib import Path
 from .context_extractor import MarkdownContextExtractor
 from .json_utils import robust_json_parse
 from .image_utils import create_image_resolver
+from .markdown_utils import format_as_collapsible_block
 from . import prompts
 
 logger = logging.getLogger("another_ec.processor")
@@ -34,6 +35,73 @@ class MarkdownMultimodalProcessor:
         self.vlm_func = vlm_func
         self.extractor = context_extractor or MarkdownContextExtractor()
         self.caption_mode = caption_mode
+
+    async def enrich_markdown(
+        self, 
+        md_content: str, 
+        image_resolver: Callable[[str], bytes] = None,
+        base_dir: str | Path = "."
+    ) -> str:
+        """
+        核心功能：在 Markdown 原文的图片/表格下方直接注入 AI 解析折叠块。
+        返回增强后的 Markdown 全文。
+        """
+        if image_resolver is None:
+            image_resolver = create_image_resolver(base_dir)
+
+        tokens = self.extractor.md.parse(md_content)
+        lines = md_content.splitlines()
+        
+        # 记录待插入的位置： (行号, 插入内容)
+        # markdown-it 的 map[1] 是结束行号（0-indexed, exclusive）
+        insertions = []
+
+        for i, token in enumerate(tokens):
+            # 1. 处理图片 (位于 Inline 内部)
+            if token.type == "inline" and token.children:
+                for child in token.children:
+                    if child.type == "image":
+                        img_url = child.attrGet("src")
+                        img_bytes = image_resolver(img_url)
+                        
+                        if img_bytes:
+                            # 找到该图片所属段落的起始和结束行
+                            target_line = -1
+                            if i > 0 and tokens[i-1].type == "paragraph_open" and tokens[i-1].map:
+                                target_line = tokens[i-1].map[1]
+                            elif token.map: 
+                                target_line = token.map[1]
+
+                            if target_line != -1:
+                                logger.info(f"Processing image for enrichment: {img_url}")
+                                res = await self.process_image_in_markdown(md_content, img_url, img_bytes)
+                                block = format_as_collapsible_block(res)
+                                if block:
+                                    insertions.append((target_line, block))
+
+            # 2. 处理表格
+            if token.type == "table_open" and token.map:
+                target_line = token.map[1]
+                table_md = "\n".join(lines[token.map[0]:token.map[1]])
+                
+                logger.info(f"Processing table for enrichment at line {token.map[0]}")
+                res = await self.process_table_in_markdown(md_content, table_md)
+                block = format_as_collapsible_block(res)
+                if block:
+                    insertions.append((target_line, block))
+
+        # 关键：按行号倒序排序，从后往前插入，这样不会干扰前面的行索引
+        insertions.sort(key=lambda x: x[0], reverse=True)
+        
+        enriched_lines = list(lines)
+        for line_idx, block in insertions:
+            # 在对应行之后插入
+            if line_idx < len(enriched_lines):
+                enriched_lines.insert(line_idx, "\n" + block + "\n")
+            else:
+                enriched_lines.append("\n" + block + "\n")
+
+        return "\n".join(enriched_lines)
 
     async def process_document(
         self, 

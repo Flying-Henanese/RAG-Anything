@@ -13,18 +13,20 @@
 
 ---
 
-## 2. 总体架构流程
+## 2. 总体架构流程 (V2 增强版)
 
 ```mermaid
 graph TD
-    A[输入: 图片字节流/路径] --> B[语境提取: ContextExtractor]
-    B --> C{是否有上下文?}
-    C -- 是 --> D[拼装: vision_prompt_with_context]
-    C -- 否 --> E[拼装: vision_prompt]
-    D --> F[VLM 模型推理: Qwen3-VL/GPT-4o]
+    A[输入: Markdown/图片] --> B[双向语境提取: ContextExtractor]
+    B --> C{是否包含结构化元数据?}
+    C -- 是 (Breadcrumbs/HR) --> D[提取路径与逻辑边界]
+    C -- 否 --> E[常规标题回溯]
+    D --> F[拼装: 增强型 Prompt (支持 Detailed/Concise 双模式)]
     E --> F
-    F --> G[鲁棒解析: robust_json_parse]
-    G --> H[输出: 增强描述 + 实体信息]
+    F --> G[VLM 推理: 本地 Qwen-VL 等]
+    G --> H[鲁棒解析: robust_json_parse]
+    H --> I[Markdown 无损注入: XML 标签 + 折叠块]
+    I --> J[输出: 富含图谱实体的高密度 Markdown Chunk]
 ```
 
 ---
@@ -285,7 +287,69 @@ def get_context_from_chunks(chunks: List[str], target_idx: int):
 
 ---
 
-## 10. 疑难杂症：视觉注意力劫持 (Visual Attention Hijacking)
+## 10. 面向 LightRAG 等图谱框架的无损注入 (XML + 折叠块)
+
+如果你的下游是类似于 LightRAG 的图谱框架，或者你需要在最终展示的 Markdown 中保留大模型生成的增强描述，**强烈建议使用 XML 标签配合 Markdown 折叠块**的方案。
+
+### 10.1 为什么选择这种格式？
+- **防止语境稀释**：纯文本的 Caption 散落在 Markdown 中容易导致主题漂移。
+- **图谱精准提取**：大模型对 `<image_analysis>` 这种 XML 标签极其敏感，LightRAG 在切分和构建图谱时，能直接把这些高密度标签内容转化为图谱的实体（Nodes）和关系边（Edges）。
+- **人类阅读体验好**：`<details>` 标签在主流 Markdown 渲染器中会折叠，不会干扰正文排版。
+
+### 10.2 格式化工具代码实现
+
+```python
+def format_as_collapsible_block(vlm_result: dict) -> str:
+    """
+    将 VLM 的解析结果格式化为带有 XML 标签的 Markdown 折叠块。
+    专门为 LightRAG 实体提取和人类舒适阅读设计。
+    """
+    if not vlm_result.get("success"):
+        return ""
+
+    caption = vlm_result.get("enhanced_caption", "").strip()
+    entity_info = vlm_result.get("entity_info", {})
+    
+    entities = entity_info.get("entity_name", "")
+    if isinstance(entities, list):
+        entities = ", ".join(entities)
+    summary = entity_info.get("summary", "")
+
+    # 构建折叠块，内部包裹 <image_analysis> 标签供大模型精准抓取
+    formatted_block = f\"\"\"
+<details>
+<summary>🤖 <b>AI 图像/表格解析</b></summary>
+
+<image_analysis>
+- **核心总结**: {caption}
+- **关键实体**: {entities}
+- **简短摘要**: {summary}
+</image_analysis>
+</details>
+\"\"\"
+    return formatted_block
+```
+
+### 10.3 注入示例
+在处理 Markdown 文档时，将此折叠块直接追加到原始图片链接下方：
+
+```markdown
+[c17614a4ad447a787d3a1131825a2d22.png](attachment:0c3997f7-3107-43c9-8c90-b99b8283dbf7:c17614a4ad447a787d3a1131825a2d22.png)
+
+<details>
+<summary>🤖 <b>AI 图像/表格解析</b></summary>
+
+<image_analysis>
+- **核心总结**: 单机多路并发解析架构图，展示了 FastAPI 接收请求，Celery 异步队列分发到 GPU Worker 的流程。
+- **关键实体**: FastAPI, Celery, GPU Worker, 异步队列
+- **简短摘要**: 架构处理高并发的中间件流程展示。
+</image_analysis>
+</details>
+```
+
+---
+
+## 11. 疑难杂症：视觉注意力劫持 (Visual Attention Hijacking)
 
 在实际业务中，有一种常见的多模态处理痛点：当文档配图是**系统界面截图**、**功能演示图**或**包含大量示例文字的图片**时，VLM 往往会“舍本逐末”，疯狂转录图片里的占位文字，而忽略了图片试图展示的功能结构。
 

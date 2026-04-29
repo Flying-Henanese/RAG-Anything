@@ -9,8 +9,8 @@ from pathlib import Path
 from .context_extractor import MarkdownContextExtractor
 from .json_utils import robust_json_parse
 from .image_utils import create_image_resolver
-from . import prompts
 from .markdown_utils import format_as_collapsible_block
+from . import prompts
 
 logger = logging.getLogger("another_ec.processor")
 
@@ -36,23 +36,72 @@ class MarkdownMultimodalProcessor:
         self.extractor = context_extractor or MarkdownContextExtractor()
         self.caption_mode = caption_mode
 
-    def _normalize_vlm_result(self, parsed_result: Any, raw_response: str, source: str) -> Dict[str, Any]:
-        """将 robust_json_parse 的结果统一规范为 dict，避免 list/str 导致 .get 崩溃。"""
-        if isinstance(parsed_result, dict):
-            return parsed_result
+    async def enrich_markdown(
+        self, 
+        md_content: str, 
+        image_resolver: Callable[[str], bytes] = None,
+        base_dir: str | Path = "."
+    ) -> str:
+        """
+        核心功能：在 Markdown 原文的图片/表格下方直接注入 AI 解析折叠块。
+        返回增强后的 Markdown 全文。
+        """
+        if image_resolver is None:
+            image_resolver = create_image_resolver(base_dir)
 
-        if isinstance(parsed_result, list):
-            for item in parsed_result:
-                if isinstance(item, dict):
-                    return item
-            logger.warning(f"[Diagnostics] {source}: parsed result is list but contains no dict. Raw: {raw_response[:200]}...")
-            return {}
+        tokens = self.extractor.md.parse(md_content)
+        lines = md_content.splitlines()
+        
+        # 记录待插入的位置： (行号, 插入内容)
+        # markdown-it 的 map[1] 是结束行号（0-indexed, exclusive）
+        insertions = []
 
-        if parsed_result is None:
-            return {}
+        for i, token in enumerate(tokens):
+            # 1. 处理图片 (位于 Inline 内部)
+            if token.type == "inline" and token.children:
+                for child in token.children:
+                    if child.type == "image":
+                        img_url = child.attrGet("src")
+                        img_bytes = image_resolver(img_url)
+                        
+                        if img_bytes:
+                            # 找到该图片所属段落的起始和结束行
+                            target_line = -1
+                            if i > 0 and tokens[i-1].type == "paragraph_open" and tokens[i-1].map:
+                                target_line = tokens[i-1].map[1]
+                            elif token.map: 
+                                target_line = token.map[1]
 
-        logger.warning(f"[Diagnostics] {source}: parsed result type={type(parsed_result).__name__}. Raw: {raw_response[:200]}...")
-        return {}
+                            if target_line != -1:
+                                logger.info(f"Processing image for enrichment: {img_url}")
+                                res = await self.process_image_in_markdown(md_content, img_url, img_bytes)
+                                block = format_as_collapsible_block(res)
+                                if block:
+                                    insertions.append((target_line, block))
+
+            # 2. 处理表格
+            if token.type == "table_open" and token.map:
+                target_line = token.map[1]
+                table_md = "\n".join(lines[token.map[0]:token.map[1]])
+                
+                logger.info(f"Processing table for enrichment at line {token.map[0]}")
+                res = await self.process_table_in_markdown(md_content, table_md)
+                block = format_as_collapsible_block(res)
+                if block:
+                    insertions.append((target_line, block))
+
+        # 关键：按行号倒序排序，从后往前插入，这样不会干扰前面的行索引
+        insertions.sort(key=lambda x: x[0], reverse=True)
+        
+        enriched_lines = list(lines)
+        for line_idx, block in insertions:
+            # 在对应行之后插入
+            if line_idx < len(enriched_lines):
+                enriched_lines.insert(line_idx, "\n" + block + "\n")
+            else:
+                enriched_lines.append("\n" + block + "\n")
+
+        return "\n".join(enriched_lines)
 
     async def process_document(
         self, 
@@ -154,12 +203,11 @@ class MarkdownMultimodalProcessor:
             if not raw_response or not raw_response.strip():
                 logger.warning(f"VLM returned empty string for {image_url}")
                 
-            parsed_result = robust_json_parse(raw_response)
-            result = self._normalize_vlm_result(parsed_result, raw_response, f"image:{image_url}")
+            result = robust_json_parse(raw_response)
 
-            # 诊断日志：如果解析结果为空，说明 robust_json_parse 或归一化后没有可用字段
+            # 诊断日志：如果解析结果为空，说明 robust_json_parse 没有提取到可用字段
             if not result:
-                logger.warning(f"[Diagnostics] JSON parsing failed or normalized result is empty for {image_url}. Raw string was: {raw_response[:200]}...")
+                logger.warning(f"[Diagnostics] JSON parsing failed or result is empty for {image_url}. Raw string was: {raw_response[:200]}...")
 
             return {
                 "url": image_url,
@@ -189,8 +237,7 @@ class MarkdownMultimodalProcessor:
         try:
             # 表格不需要图片数据，传 None
             raw_response = await self.vlm_func(user_prompt, prompts.TABLE_ANALYSIS_SYSTEM, None)
-            parsed_result = robust_json_parse(raw_response)
-            result = self._normalize_vlm_result(parsed_result, raw_response, "table")
+            result = robust_json_parse(raw_response)
             return {
                 "enhanced_caption": result.get("detailed_description", ""),
                 "entity_info": result.get("entity_info", {}),
@@ -261,22 +308,24 @@ async def main():
     
     print(f">>> 开始处理文档: {md_path.name}")
     print(f">>> 基础目录: {base_dir}")
-    
     try:
-        # 使用内置的 image_resolver (通过传入 base_dir 自动创建)
-        # 它会自动处理文档中引用的本地图片路径
-        results = await processor.process_document(test_md, base_dir=base_dir)
+        enriched_md = await processor.enrich_markdown(test_md, base_dir=base_dir)
+        print(enriched_md)
+    # try:
+    #     # 使用内置的 image_resolver (通过传入 base_dir 自动创建)
+    #     # 它会自动处理文档中引用的本地图片路径
+    #     results = await processor.process_document(test_md, base_dir=base_dir)
 
-        blocks = []
-        for item in results:
-            data = item.get("data") if isinstance(item, dict) else None
-            if isinstance(data, dict):
-                block = format_as_collapsible_block(data)
-                if block:
-                    blocks.append(block)
+    #     blocks = []
+    #     for item in results:
+    #         data = item.get("data") if isinstance(item, dict) else None
+    #         if isinstance(data, dict):
+    #             block = format_as_collapsible_block(data)
+    #             if block:
+    #                 blocks.append(block)
 
-        injected_markdown_block = "\n".join(blocks)
-        print(injected_markdown_block)
+    #     injected_markdown_block = "\n".join(blocks)
+    #     print(injected_markdown_block)
     except Exception as e:
         print(f"\n>>> 处理过程中发生错误: {e}")
 

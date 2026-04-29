@@ -1,7 +1,5 @@
 import logging
 import base64
-import asyncio
-import httpx
 from typing import Dict, Any, Optional, Callable, Awaitable, List
 from pathlib import Path
 
@@ -14,12 +12,6 @@ from . import prompts
 
 logger = logging.getLogger("another_ec.processor")
 
-# 本地 OpenAI 兼容服务需要的占位 API Key
-LOCAL_API_KEY = "no-api-key"
-
-# 当前使用的视觉模型
-LOCAL_VLM_MODEL = "Qwen3-VL-8B-Instruct"
-
 class MarkdownMultimodalProcessor:
     """
     Markdown 多模态处理器 (功能完备版)
@@ -30,7 +22,7 @@ class MarkdownMultimodalProcessor:
         self, 
         vlm_func: Callable[[str, str, Optional[str]], Awaitable[str]],
         context_extractor: Optional[MarkdownContextExtractor] = None,
-        caption_mode: str = "detailed"  # 支持 "detailed" (适合 GraphRAG) 或 "concise" (适合传统 RAG)
+        caption_mode: str = "detailed"  # 支持 "detailed" 或 "concise"
     ):
         self.vlm_func = vlm_func
         self.extractor = context_extractor or MarkdownContextExtractor()
@@ -39,25 +31,21 @@ class MarkdownMultimodalProcessor:
     async def enrich_markdown(
         self, 
         md_content: str, 
-        image_resolver: Callable[[str], bytes] = None,
+        image_resolver: Optional[Callable[[str], bytes]] = None,
         base_dir: str | Path = "."
     ) -> str:
         """
-        核心功能：在 Markdown 原文的图片/表格下方直接注入 AI 解析折叠块。
-        返回增强后的 Markdown 全文。
+        在 Markdown 原文的图片/表格下方直接注入 AI 解析折叠块。
         """
         if image_resolver is None:
             image_resolver = create_image_resolver(base_dir)
 
         tokens = self.extractor.md.parse(md_content)
         lines = md_content.splitlines()
-        
-        # 记录待插入的位置： (行号, 插入内容)
-        # markdown-it 的 map[1] 是结束行号（0-indexed, exclusive）
         insertions = []
 
         for i, token in enumerate(tokens):
-            # 1. 处理图片 (位于 Inline 内部)
+            # 1. 处理图片
             if token.type == "inline" and token.children:
                 for child in token.children:
                     if child.type == "image":
@@ -65,16 +53,13 @@ class MarkdownMultimodalProcessor:
                         img_bytes = image_resolver(img_url)
                         
                         if img_bytes:
-                            # 找到该图片所属段落的起始和结束行
-                            target_line = -1
+                            target_line = token.map[1] if token.map else -1
                             if i > 0 and tokens[i-1].type == "paragraph_open" and tokens[i-1].map:
                                 target_line = tokens[i-1].map[1]
-                            elif token.map: 
-                                target_line = token.map[1]
 
                             if target_line != -1:
-                                logger.info(f"Processing image for enrichment: {img_url}")
-                                res = await self.process_image_in_markdown(md_content, img_url, img_bytes)
+                                logger.info(f"Processing image: {img_url}")
+                                res = await self.process_image(md_content, img_url, img_bytes)
                                 block = format_as_collapsible_block(res)
                                 if block:
                                     insertions.append((target_line, block))
@@ -84,72 +69,45 @@ class MarkdownMultimodalProcessor:
                 target_line = token.map[1]
                 table_md = "\n".join(lines[token.map[0]:token.map[1]])
                 
-                logger.info(f"Processing table for enrichment at line {token.map[0]}")
-                res = await self.process_table_in_markdown(md_content, table_md)
+                logger.info(f"Processing table at line {token.map[0]}")
+                res = await self.process_table(md_content, table_md, target_idx=i)
                 block = format_as_collapsible_block(res)
                 if block:
                     insertions.append((target_line, block))
 
-        # 关键：按行号倒序排序，从后往前插入，这样不会干扰前面的行索引
+        # 按行号倒序插入
         insertions.sort(key=lambda x: x[0], reverse=True)
-        
         enriched_lines = list(lines)
         for line_idx, block in insertions:
-            # 在对应行之后插入
+            content = "\n" + block + "\n"
             if line_idx < len(enriched_lines):
-                enriched_lines.insert(line_idx, "\n" + block + "\n")
+                enriched_lines.insert(line_idx, content)
             else:
-                enriched_lines.append("\n" + block + "\n")
+                enriched_lines.append(content)
 
         return "\n".join(enriched_lines)
 
-    async def process_document(
+    async def _analyze_element(
         self, 
-        md_content: str, 
-        image_resolver: Callable[[str], bytes] = None,
-        base_dir: str | Path = "."
-    ) -> List[Dict[str, Any]]:
-        """
-        自动扫描并处理 Markdown 中的所有多模态元素（图片和表格）
-        
-        Args:
-            md_content: Markdown 全文
-            image_resolver: 接收 URL 返回字节流的函数。若未提供，将使用内置支持网络/本地路径的全能解析器。
-            base_dir: 若使用内置解析器，请传入 Markdown 文件所在的物理目录以确保相对路径正确。
-        """
-        # 如果用户没有注入自己的解析器，启用我们写的内置强力解析器
-        if image_resolver is None:
-            image_resolver = create_image_resolver(base_dir)
+        user_prompt: str, 
+        system_prompt: str, 
+        image_bytes: Optional[bytes] = None
+    ) -> Dict[str, Any]:
+        """统一的 VLM 分析与解析逻辑"""
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8") if image_bytes else None
+        try:
+            raw_response = await self.vlm_func(user_prompt, system_prompt, image_base64)
+            result = robust_json_parse(raw_response)
+            return {
+                "enhanced_caption": result.get("detailed_description", ""),
+                "entity_info": result.get("entity_info", {}),
+                "success": True
+            }
+        except Exception as e:
+            logger.error(f"VLM analysis failed: {e}")
+            return {"success": False, "error": str(e)}
 
-        tokens = self.extractor.md.parse(md_content)
-        results = []
-
-        for i, token in enumerate(tokens):
-            # 1. 处理图片 (Inline 里的 Image)
-            if token.type == "inline" and token.children:
-                for child in token.children:
-                    if child.type == "image":
-                        img_url = child.attrGet("src")
-                        img_bytes = image_resolver(img_url) if image_resolver else None
-                        
-                        if img_bytes:
-                            res = await self.process_image_in_markdown(md_content, img_url, img_bytes)
-                            results.append({"type": "image", "data": res})
-                        else:
-                            logger.warning(f"Could not resolve bytes for image: {img_url}")
-
-            # 2. 处理表格 (markdown-it 的 table_open)
-            if token.type == "table_open":
-                # 简单处理：抓取表格的原始 Markdown（通过 token 的 map 范围）
-                if token.map:
-                    lines = md_content.splitlines()
-                    table_md = "\n".join(lines[token.map[0]:token.map[1]])
-                    res = await self.process_table_in_markdown(md_content, table_md)
-                    results.append({"type": "table", "data": res})
-
-        return results
-
-    async def process_image_in_markdown(
+    async def process_image(
         self, 
         md_content: str, 
         image_url: str, 
@@ -157,177 +115,40 @@ class MarkdownMultimodalProcessor:
         entity_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """处理单张图片"""
-        context = self.extractor.extract_context(md_content, image_url)
+        context = self.extractor.extract_context(md_content, target_image_url=image_url)
         
-        # 3. 选择模板并格式化
-        if self.caption_mode == "concise":
-            if context:
-                user_prompt = prompts.VISION_PROMPT_CONCISE_WITH_CONTEXT.format(
-                    context=context,
-                    entity_name=entity_name or Path(image_url).stem,
-                    image_path=image_url
-                )
-            else:
-                user_prompt = prompts.VISION_PROMPT_CONCISE.format(
-                    entity_name=entity_name or Path(image_url).stem,
-                    image_path=image_url
-                )
+        # 选择 Prompt 模板
+        is_concise = self.caption_mode == "concise"
+        if context:
+            tpl = prompts.VISION_PROMPT_CONCISE_WITH_CONTEXT if is_concise else prompts.VISION_PROMPT_WITH_CONTEXT
+            user_prompt = tpl.format(context=context, entity_name=entity_name or Path(image_url).stem, image_path=image_url)
         else:
-            if context:
-                user_prompt = prompts.VISION_PROMPT_WITH_CONTEXT.format(
-                    context=context,
-                    entity_name=entity_name or Path(image_url).stem,
-                    image_path=image_url
-                )
-            else:
-                user_prompt = prompts.VISION_PROMPT.format(
-                    entity_name=entity_name or Path(image_url).stem,
-                    image_path=image_url
-                )
+            tpl = prompts.VISION_PROMPT_CONCISE if is_concise else prompts.VISION_PROMPT
+            user_prompt = tpl.format(entity_name=entity_name or Path(image_url).stem, image_path=image_url)
 
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        res = await self._analyze_element(user_prompt, prompts.IMAGE_ANALYSIS_SYSTEM, image_bytes)
+        res["url"] = image_url
+        res["context_used"] = context
+        return res
 
-        try:
-            # 记录即将调用的 VLM 参数长度，确认图片是否正常传入
-            logger.debug(f"Calling VLM for {image_url}. Prompt len: {len(user_prompt)}, Base64 len: {len(image_base64)}")
-            
-            raw_response = await self.vlm_func(
-                user_prompt, 
-                prompts.IMAGE_ANALYSIS_SYSTEM, 
-                image_base64
-            )
-            
-            # 关键诊断日志：打印 VLM 返回的原始字符串
-            logger.info(f"[Diagnostics] VLM Raw Response for {image_url}:\n{raw_response}")
-            
-            if not raw_response or not raw_response.strip():
-                logger.warning(f"VLM returned empty string for {image_url}")
-                
-            result = robust_json_parse(raw_response)
-
-            # 诊断日志：如果解析结果为空，说明 robust_json_parse 没有提取到可用字段
-            if not result:
-                logger.warning(f"[Diagnostics] JSON parsing failed or result is empty for {image_url}. Raw string was: {raw_response[:200]}...")
-
-            return {
-                "url": image_url,
-                "enhanced_caption": result.get("detailed_description", ""),
-                "entity_info": result.get("entity_info", {}),
-                "context_used": context,
-                "success": True
-            }
-        except Exception as e:
-            logger.error(f"VLM call failed: {e}")
-            return {"url": image_url, "success": False, "error": str(e)}
-
-    async def process_table_in_markdown(
+    async def process_table(
         self,
         md_content: str,
         table_markdown: str,
-        entity_name: Optional[str] = None
+        entity_name: Optional[str] = None,
+        target_idx: int = -1
     ) -> Dict[str, Any]:
         """处理单个表格"""
-        # 注意：这里我们可以复用 extractor 逻辑来获取表格上方的标题
-        # 为了保持简洁，这里演示直接调用
+        # 尝试为表格提取语境
+        context = ""
+        if target_idx != -1:
+            context = self.extractor.extract_context(md_content, target_idx=target_idx)
+
+        # 目前表格暂未在 prompts.py 中区分 concise 模式，此处保持原样
         user_prompt = prompts.TABLE_PROMPT.format(
             entity_name=entity_name or "table_entity",
             table_body=table_markdown
         )
-
-        try:
-            # 表格不需要图片数据，传 None
-            raw_response = await self.vlm_func(user_prompt, prompts.TABLE_ANALYSIS_SYSTEM, None)
-            result = robust_json_parse(raw_response)
-            return {
-                "enhanced_caption": result.get("detailed_description", ""),
-                "entity_info": result.get("entity_info", {}),
-                "success": True
-            }
-        except Exception as e:
-            logger.error(f"Table analysis failed: {e}")
-            return {"success": False, "error": str(e)}
-
-async def vlm_call_local_qwen(prompt: str, system_prompt: str, image_base64: Optional[str] = None) -> str:
-    """
-    本地 Qwen VLM 接口调用实现 (OpenAI 兼容)
-    """
-    url = "http://192.168.0.194:8888/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {LOCAL_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    # 构造多模态消息内容
-    content = [{"type": "text", "text": prompt}]
-    if image_base64:
-        content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{image_base64}"
-            }
-        })
-    
-    payload = {
-        "model": LOCAL_VLM_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content}
-        ],
-        "stream": False,
-        "max_tokens": 2048,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"}  # 强制输出 JSON 结构
-    }
-
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.post(url, json=payload, headers=headers, timeout=60)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"Local Qwen API Error: {e}")
-            raise
-
-async def main():
-    # 1. 使用指定的测试 Markdown 文档
-    md_file_path = "/home/mineru_dev/github/RAG-Anything/test_md/高性能文档解析方案 2e2848cda67f8020abf0d58252a28708.md"
-    md_path = Path(md_file_path)
-    
-    if not md_path.exists():
-        print(f"错误: 找不到测试文档 {md_file_path}")
-        return
-
-    with open(md_path, "r", encoding="utf-8") as f:
-        test_md = f.read()
-    
-    # 2. 获取文档所在目录，用于解析本地图片
-    base_dir = md_path.parent
-
-    # 3. 初始化处理器
-    processor = MarkdownMultimodalProcessor(vlm_func=vlm_call_local_qwen)
-    
-    print(f">>> 开始处理文档: {md_path.name}")
-    print(f">>> 基础目录: {base_dir}")
-    try:
-        enriched_md = await processor.enrich_markdown(test_md, base_dir=base_dir)
-        print(enriched_md)
-    # try:
-    #     # 使用内置的 image_resolver (通过传入 base_dir 自动创建)
-    #     # 它会自动处理文档中引用的本地图片路径
-    #     results = await processor.process_document(test_md, base_dir=base_dir)
-
-    #     blocks = []
-    #     for item in results:
-    #         data = item.get("data") if isinstance(item, dict) else None
-    #         if isinstance(data, dict):
-    #             block = format_as_collapsible_block(data)
-    #             if block:
-    #                 blocks.append(block)
-
-    #     injected_markdown_block = "\n".join(blocks)
-    #     print(injected_markdown_block)
-    except Exception as e:
-        print(f"\n>>> 处理过程中发生错误: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        # 如果将来 TABLE_PROMPT 支持 context，可以在此处注入
+        
+        return await self._analyze_element(user_prompt, prompts.TABLE_ANALYSIS_SYSTEM)

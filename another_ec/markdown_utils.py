@@ -9,10 +9,10 @@ def format_as_collapsible_block(vlm_result: dict) -> str:
     caption = vlm_result.get("enhanced_caption", "").strip()
     entity_info = vlm_result.get("entity_info", {})
     
-    # 提取实体名称或摘要
-    #entities = entity_info.get("entity_name", "")
-    #if isinstance(entities, list):
-    #    entities = ", ".join(entities)
+    # 提取实体名称
+    entities = entity_info.get("entity_name", "Unknown")
+    if isinstance(entities, list):
+        entities = ", ".join(entities)
 
     # 提取实体摘要补充信息
     summary = entity_info.get("summary", "")
@@ -24,7 +24,7 @@ def format_as_collapsible_block(vlm_result: dict) -> str:
 
 <image_analysis>
 - **核心总结**: {caption}
-- **关键实体**: entities
+- **关键实体**: {entities}
 - **简短摘要**: {summary}
 </image_analysis>
 </details>

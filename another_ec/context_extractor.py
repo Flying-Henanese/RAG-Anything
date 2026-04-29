@@ -13,26 +13,29 @@ class MarkdownContextExtractor:
     从 Markdown Token 流中手术刀式地提取多模态元素（图片/表格）的语境。
     """
 
-    def __init__(self, max_tokens: int = 1000):
+    def __init__(self, max_chars: int = 200):
         self.md = MarkdownIt()
-        self.max_tokens = max_tokens
+        self.max_chars = max_chars
 
-    def extract_context(self, md_content: str, target_image_url: str) -> str:
+    def extract_context(self, md_content: str, target_image_url: Optional[str] = None, target_idx: int = -1) -> str:
         """
-        根据图片 URL 提取其在 Markdown 中的语境。
+        提取元素在 Markdown 中的语境。
         
         Args:
             md_content: 原始 Markdown 字符串
             target_image_url: 目标图片的 URL (用于定位)
+            target_idx: 直接指定 Token 索引 (若已知)
             
         Returns:
-            提取出的语境字符串（包含父章节标题和紧邻段落）
+            提取出的语境字符串
         """
         tokens = self.md.parse(md_content)
-        target_idx = self._find_image_token_index(tokens, target_image_url)
+        
+        if target_idx == -1 and target_image_url:
+            target_idx = self._find_image_token_index(tokens, target_image_url)
         
         if target_idx == -1:
-            logger.warning(f"Image with URL {target_image_url} not found in tokens.")
+            logger.warning("Target element not found in tokens.")
             return ""
 
         return self._get_surgical_context(tokens, target_idx)
@@ -54,12 +57,12 @@ class MarkdownContextExtractor:
         """
         核心算法：手术刀式提取 (升级版)。
         1. 双向回溯/探测关联标题，支持 | 分隔的路径。
-        2. 以 hr 为逻辑边界，提取紧邻的正文段落。
+        2. 以 hr 为逻辑边界，双向提取上方和下方的紧邻正文段落，并在提取时动态控制总字符数防止硬截断。
         """
         context_parts = []
+        current_length = 0
         
         # 1. 寻找关联标题 (Heading Association)
-        # 搜索策略：优先向上找，若上方紧邻是边界或空，尝试向下找 1-2 行（处理头图场景）
         parent_header = ""
         search_indices = list(range(target_idx - 1, -1, -1))
         # 兜底：如果图片出现在章节的最上方，探测下方最近的标题
@@ -85,24 +88,56 @@ class MarkdownContextExtractor:
         
         if parent_header:
             context_parts.append(parent_header)
+            current_length += len(parent_header) + 1 # +1 for newline
 
-        # 2. 寻找邻近正文 (Context Paragraphs)
+        # 2. 寻找上方邻近正文 (Previous Context Paragraphs)
         prev_paragraphs = []
-        max_paras = 5
+        max_prev_paras = 2 # 谨慎提取，上方最多 2 段
         for i in range(target_idx - 1, -1, -1):
             if tokens[i].type == "hr": # 碰到分隔符停止提取，避免跨块语境污染
                 break
             if tokens[i].type == "inline" and tokens[i].content.strip():
                 # 排除掉已经是标题的内容
                 if i > 0 and tokens[i-1].type != "heading_open":
-                    prev_paragraphs.append(tokens[i].content.strip())
-                    if len(prev_paragraphs) >= max_paras:
+                    paragraph = tokens[i].content.strip()
+                    # 动态长度检查：如果加入这段文字会超限，则停止收集 (保证整句完整)
+                    if current_length + len(paragraph) > self.max_chars and len(prev_paragraphs) > 0:
+                        break
+                    
+                    prev_paragraphs.append(paragraph)
+                    current_length += len(paragraph) + 1
+                    
+                    if len(prev_paragraphs) >= max_prev_paras or current_length >= self.max_chars:
                         break
         
         if prev_paragraphs:
             prev_paragraphs.reverse()
-            context_parts.append("Background Context:\n" + "\n".join(prev_paragraphs))
+            context_parts.append("Previous Context:\n" + "\n".join(prev_paragraphs))
 
-        # 3. 组合并截断
-        full_context = "\n".join(context_parts)
-        return full_context[:self.max_tokens]
+        # 3. 寻找下方邻近正文 (Next Context Paragraphs)
+        next_paragraphs = []
+        max_next_paras = 2 # 谨慎提取，下方最多 2 段
+        for i in range(target_idx + 1, len(tokens)):
+            if tokens[i].type == "hr": # 碰到分隔符停止向下提取
+                break
+            if tokens[i].type == "heading_open": # 碰到新章节标题，停止向下提取
+                break
+            if tokens[i].type == "inline" and tokens[i].content.strip():
+                # 排除掉已经是标题的内容
+                if i > 0 and tokens[i-1].type != "heading_open":
+                    paragraph = tokens[i].content.strip()
+                    # 动态长度检查：如果加入这段文字会超限，则停止收集
+                    if current_length + len(paragraph) > self.max_chars and len(next_paragraphs) > 0:
+                        break
+                    
+                    next_paragraphs.append(paragraph)
+                    current_length += len(paragraph) + 1
+                    
+                    if len(next_paragraphs) >= max_next_paras or current_length >= self.max_chars:
+                        break
+
+        if next_paragraphs:
+            context_parts.append("Following Context:\n" + "\n".join(next_paragraphs))
+
+        # 4. 组合返回
+        return "\n".join(context_parts)
